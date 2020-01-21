@@ -24,7 +24,7 @@ import android.widget.ArrayAdapter;
 
 import com.facebook.react.bridge.ActivityEventListener;
 import com.facebook.react.bridge.Arguments;
-import com.facebook.react.bridge.Callback;
+import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
@@ -52,8 +52,14 @@ public class FilePickerModule extends ReactContextBaseJavaModule implements Acti
 
     private final ReactApplicationContext mReactContext;
 
-    private Callback mCallback;
-    WritableMap response;
+    private static final String E_ACTIVITY_DOES_NOT_EXIST = "ACTIVITY_DOES_NOT_EXIST";
+    private static final String E_PERMISSION_DENIED = "PERMISSION_DENIED";
+    private static final String E_UNABLE_TO_OPEN_FILE_TYPE = "UNABLE_TO_OPEN_FILE_TYPE";
+    private static final String E_UNKNOWN_ACTIVITY_RESULT = "UNKNOWN_ACTIVITY_RESULT";
+    private static final String E_INVALID_DATA_RETURNED = "INVALID_DATA_RETURNED";
+    private static final String E_UNEXPECTED_EXCEPTION = "UNEXPECTED_EXCEPTION";
+
+    private Promise mPromise;
 
     public FilePickerModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -69,13 +75,11 @@ public class FilePickerModule extends ReactContextBaseJavaModule implements Acti
     }
 
     @ReactMethod
-    public void showFilePicker(final ReadableMap options, final Callback callback) {
+    public void showFilePicker(final ReadableMap options, final Promise promise) {
         final Activity currentActivity = getCurrentActivity();
-        response = Arguments.createMap();
 
         if (currentActivity == null) {
-            response.putString("error", "can't find current Activity");
-            callback.invoke(response);
+            promise.reject(E_ACTIVITY_DOES_NOT_EXIST, "Current activity does not exist");
             return;
         }
 
@@ -96,28 +100,26 @@ public class FilePickerModule extends ReactContextBaseJavaModule implements Acti
                         if (writePermission != PackageManager.PERMISSION_GRANTED
                                 || readPermission != PackageManager.PERMISSION_GRANTED) {
                             // user rejected permission request
-                            response.putString("error", "User rejected permission request");
-                            callback.invoke(response);
+                            promise.reject(E_PERMISSION_DENIED, "User rejected permission request");
                             return true;
                         }
                         // permissions available
-                        launchFileChooser(options, callback);
+                        launchFileChooser(options, promise);
                         return true;
                     }
                     return true;
                 }
             });
         } else {
-            launchFileChooser(options, callback);
+            launchFileChooser(options, promise);
         }
     }
 
     // NOTE: Currently not reentrant / doesn't support concurrent requests
     @ReactMethod
-    public void launchFileChooser(final ReadableMap options, final Callback callback) {
+    public void launchFileChooser(final ReadableMap options, final Promise promise) {
         int requestCode;
         Intent libraryIntent;
-        response = Arguments.createMap();
         Activity currentActivity = getCurrentActivity();
         String type = "*/*";
         boolean multiple = false;
@@ -130,8 +132,7 @@ public class FilePickerModule extends ReactContextBaseJavaModule implements Acti
         }
 
         if (currentActivity == null) {
-            response.putString("error", "can't find current Activity");
-            callback.invoke(response);
+            promise.reject(E_ACTIVITY_DOES_NOT_EXIST, "Current activity does not exist");
             return;
         }
 
@@ -150,12 +151,11 @@ public class FilePickerModule extends ReactContextBaseJavaModule implements Acti
         libraryIntent.addCategory(Intent.CATEGORY_OPENABLE);
 
         if (libraryIntent.resolveActivity(mReactContext.getPackageManager()) == null) {
-            response.putString("error", "Cannot launch file library");
-            callback.invoke(response);
+            promise.reject(E_UNABLE_TO_OPEN_FILE_TYPE, "Cannot launch file library");
             return;
         }
 
-        mCallback = callback;
+        mPromise = promise;
 
         try {
             Intent intent = null;
@@ -179,13 +179,12 @@ public class FilePickerModule extends ReactContextBaseJavaModule implements Acti
     public void onActivityResult(final int requestCode, final int resultCode,
                                  final Intent data) {
         //robustness code
-        if (mCallback == null || requestCode != REQUEST_LAUNCH_FILE_CHOOSER) {
+        if (mPromise == null || requestCode != REQUEST_LAUNCH_FILE_CHOOSER) {
             return;
         }
         // user cancel
         if (resultCode != Activity.RESULT_OK) {
-            response.putBoolean("didCancel", true);
-            mCallback.invoke(response);
+            mPromise.reject(E_UNKNOWN_ACTIVITY_RESULT, "Unknown activity result: " + resultCode);
             return;
         }
 
@@ -199,7 +198,7 @@ public class FilePickerModule extends ReactContextBaseJavaModule implements Acti
             WritableArray results = Arguments.createArray();
             if (uri != null) {
                 WritableMap doc = getDataFromURI(uri);
-                mCallback.invoke(doc);
+                mPromise.resolve(doc);
             } else if (clipData != null && clipData.getItemCount() > 0) {
                 final int length = clipData.getItemCount();
                 for (int i = 0; i < length; ++i) {
@@ -207,15 +206,13 @@ public class FilePickerModule extends ReactContextBaseJavaModule implements Acti
                     WritableMap doc = getDataFromURI(item.getUri());
                     results.pushMap(doc);
                 }
-                mCallback.invoke(results);
+                mPromise.resolve(results);
             } else {
-                response.putString("error", "Invalid data returned by intent");
-                mCallback.invoke(response);
+                mPromise.reject(E_INVALID_DATA_RETURNED, "Invalid data returned by intent");
                 return;
             }
         } catch (Exception e) {
-            response.putString("error", e.toString());
-            mCallback.invoke(response);
+            mPromise.reject(E_UNEXPECTED_EXCEPTION, e.getLocalizedMessage(), e);
             return;
         }
     }
@@ -224,9 +221,12 @@ public class FilePickerModule extends ReactContextBaseJavaModule implements Acti
         WritableMap map = Arguments.createMap();
         Activity currentActivity = getCurrentActivity();
         map.putString("uri", uri.toString());
+
         String path = null;
         String readableSize = null;
         Long size = null;
+        // final Uri uri = uri.toString();
+
         path = getPath(currentActivity, uri);
         if (path != null) {
             map.putString("path", path);
